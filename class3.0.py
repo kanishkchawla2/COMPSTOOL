@@ -55,6 +55,8 @@ if 'results_df' not in st.session_state:
     st.session_state.results_df = None
 if 'api_keys' not in st.session_state:
     st.session_state.api_keys = []
+if 'selected_company' not in st.session_state:
+    st.session_state.selected_company = ""
 
 
 # --- Utility Functions: Helper functions for smaller tasks ---
@@ -130,7 +132,7 @@ For each company in the list, provide the following analysis:
 1.  **Business Summary**: A concise 1-2 sentence summary of what the company does.
 2.  **Business Model**: How the company primarily generates revenue (e.g., B2B, B2C, SaaS, advertising).
 3.  **Key Products/Services**: The main products or services offered.
-4.  **Relevance Score**: A numerical score from 1.00 to 100.00 indicating how similar the company's business is to the target company. A higher score means a more direct competitor.
+4.  **Relevance Score**: A numerical score from 1.00 to 100.00 indicating how similar the company's business is to the target company. A higher score means a more direct competitor. For the target company itself, this score should be 100.00.
 5.  **Relevance Reason**: A brief 1-2 sentence explanation for the given relevance score.
 
 **Required Response Format (Strict JSON):**
@@ -245,7 +247,7 @@ def run_analysis(df_to_process, target_bd, batch_size, key_usage_limit):
         st.session_state.results_df = final_df
         st.session_state.processing_complete = True
         progress_bar.empty()
-        st.success(f"✅ Analysis Complete! Processed {len(final_df)} industry peers.")
+        st.success(f"✅ Analysis Complete! Processed {len(final_df)} companies.")
         st.balloons()
 
     except Exception as e:
@@ -300,49 +302,54 @@ tab1, tab2, tab3 = st.tabs(["▶️ Select & Analyze", "📊 Results", "📈 Ana
 with tab1:
     st.header("1. Select a Company for Analysis")
     if master_df is not None:
-        symbols_list = master_df['Company Name'].unique().tolist()
-        selected_symbol = st.selectbox(
-            "Search for a company by its symbol:",
-            options=[""] + sorted(symbols_list),
-            format_func=lambda x: "Select a symbol..." if x == "" else x,
+        company_list = master_df['Company Name'].unique().tolist()
+        selected_company = st.selectbox(
+            "Search for a company:",
+            options=[""] + sorted(company_list),
+            format_func=lambda x: "Select a company..." if x == "" else x,
             help="Choose the company you want to analyze."
         )
 
-        if selected_symbol:
-            target_company_data = master_df[master_df['Company Name'] == selected_symbol].iloc[0]
+        # Store selected company in session state
+        if selected_company:
+            st.session_state.selected_company = selected_company
+
+        if selected_company:
+            target_company_data = master_df[master_df['Company Name'] == selected_company].iloc[0]
             target_bd = target_company_data['Business Description']
             target_industry = target_company_data['Industry']
 
-            st.subheader(f"Target: {selected_symbol} ({target_industry})")
+            st.subheader(f"Target: {selected_company} ({target_industry})")
             with st.expander("Show Business Description"):
                 st.write(target_bd)
 
-            peers_df = master_df[
-                (master_df['Industry'] == target_industry) &
-                (master_df['Company Name'] != selected_symbol)
-                ].copy()
+            # This dataframe now includes the target company for analysis.
+            companies_to_analyze_df = master_df[
+                (master_df['Industry'] == target_industry)
+            ].copy()
 
             st.header("2. Start Analysis")
-            if not peers_df.empty:
+            if not companies_to_analyze_df.empty:
                 st.write(
-                    f"Found **{len(peers_df)}** other companies in the **'{target_industry}'** industry to analyze.")
-                if st.button(f"🚀 Analyze Peers of {selected_symbol}", type="primary"):
+                    f"Found **{len(companies_to_analyze_df)}** companies in the **'{target_industry}'** industry to analyze (including the target company).")
+                if st.button(f"🚀 Analyze Industry for {selected_company}", type="primary"):
                     if st.session_state.api_keys:
-                        run_analysis(peers_df, target_bd, batch_size, key_usage_limit)
+                        run_analysis(companies_to_analyze_df, target_bd, batch_size, key_usage_limit)
                     else:
                         st.warning("⚠️ Please add at least one API key in the sidebar to start.")
             else:
-                st.warning(f"No other companies found in the '{target_industry}' industry to compare against.")
+                st.warning(f"No companies found in the '{target_industry}' industry to compare against.")
     else:
-        st.error("Data could not be loaded. Please check the `stock_data.xlsx` file.")
+        st.error("Data could not be loaded. Please check the `stock_info.xlsx` file.")
 
 with tab2:
     st.header("📊 Processing Results")
     if st.session_state.processing_complete and st.session_state.results_df is not None:
         df_results = st.session_state.results_df
 
+        st.subheader("Key Metrics")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Peers Analyzed", len(df_results))
+        col1.metric("Total Companies Analyzed", len(df_results))
         col2.metric("High Relevance (>70)", len(df_results[df_results['Relevance Score'] >= 70]))
         col3.metric("Medium Relevance (50-69)",
                     len(df_results[(df_results['Relevance Score'] >= 50) & (df_results['Relevance Score'] < 70)]))
@@ -351,14 +358,17 @@ with tab2:
         st.subheader("📋 Detailed Results")
         st.dataframe(df_results, use_container_width=True, height=500)
 
+        # Create an in-memory Excel file for download
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_results.to_excel(writer, sheet_name='Analysis_Results', index=False)
         output.seek(0)
+
+        current_date = datetime.now().strftime('%Y%m%d_%H%M%S')
         st.download_button(
             label="📥 Download Results (Excel)",
             data=output,
-            file_name=f"peer_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            file_name=f"peer_analysis_{st.session_state.selected_company}_{current_date}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
@@ -372,16 +382,38 @@ with tab3:
         st.subheader("📊 Relevance Score Distribution")
         st.bar_chart(df_results['Relevance Score'].value_counts().sort_index())
 
-        st.subheader("🏆 Top 10 Most Relevant Peers")
-        top_peers = df_results.head(10)[['Company Name', 'Relevance Score', 'Business Model', 'Business Summary']]
-        st.dataframe(top_peers, use_container_width=True)
+        st.subheader("🏆 Top 10 Companies by Relevance (Including Target)")
+        # Show all companies including the target company (which should have score 100)
+        top_companies = df_results.head(10)
 
-        st.subheader("💼 Business Model Distribution Among Peers")
+        # Highlight the target company in the display
+        display_df = top_companies[['Company Name', 'Relevance Score', 'Business Model', 'Business Summary']].copy()
+
+        # Add a column to indicate which is the target company
+        if st.session_state.selected_company:
+            display_df['Is Target'] = display_df['Company Name'] == st.session_state.selected_company
+            display_df['Company Type'] = display_df['Is Target'].apply(lambda x: '🎯 TARGET' if x else '🏢 Peer')
+            display_df = display_df[
+                ['Company Name', 'Company Type', 'Relevance Score', 'Business Model', 'Business Summary']]
+
+        st.dataframe(display_df, use_container_width=True)
+
+        st.subheader("💼 Business Model Distribution")
         model_counts = df_results['Business Model'].value_counts().head(10)
         st.bar_chart(model_counts)
+
+        # Additional section showing only peer companies (excluding target)
+        if st.session_state.selected_company:
+            st.subheader("🔍 Top Peer Companies (Excluding Target)")
+            peer_companies = df_results[df_results['Company Name'] != st.session_state.selected_company].head(10)
+            if not peer_companies.empty:
+                st.dataframe(peer_companies[['Company Name', 'Relevance Score', 'Business Model', 'Business Summary']],
+                             use_container_width=True)
+            else:
+                st.info("No peer companies found (only target company was analyzed).")
     else:
         st.info("📈 Analytics will be available after you run an analysis.")
 
 # --- Footer ---
 st.markdown("---")
-st.markdown("Industry Peer Analysis Tool v2.0 | Built with Streamlit & Gemini")
+st.markdown("Industry Peer Analysis Tool v2.1 | Built with Streamlit & Gemini")
