@@ -98,7 +98,7 @@ def load_gemini_model(api_key):
     """Loads and validates the Gemini model with the given API key."""
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
         # Simple test to validate the key and model
         if "OK" not in model.generate_content("Say OK").text:
             raise RuntimeError("Gemini model did not respond as expected.")
