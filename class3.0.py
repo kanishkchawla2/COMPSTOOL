@@ -6,6 +6,7 @@ import re
 import json
 import io
 from datetime import datetime
+from difflib import SequenceMatcher
 
 # --- Page Configuration: Basic setup for the app ---
 st.set_page_config(
@@ -107,6 +108,26 @@ def load_gemini_model(api_key):
         raise Exception(f"Failed to initialize Gemini model. Check your API Key. Error: {e}")
 
 
+def find_best_match(company_name, analysis_results):
+    """Find the best matching analysis result for a company name using fuzzy matching."""
+    if not analysis_results:
+        return None
+    
+    best_match = None
+    best_similarity = 0
+    
+    for analysis in analysis_results:
+        analysis_name = analysis.get('company_name', '').strip()
+        similarity = SequenceMatcher(None, company_name.lower(), analysis_name.lower()).ratio()
+        
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_match = analysis
+    
+    # Only return match if similarity is above threshold
+    return best_match if best_similarity > 0.6 else None
+
+
 def process_batch(batch_df, target_bd, model):
     """Processes a single batch of companies by sending them to the AI."""
     companies_data = []
@@ -127,7 +148,7 @@ You are a financial analyst specializing in competitive intelligence. Your task 
 **COMPANIES TO ANALYZE (PEERS IN THE SAME INDUSTRY):**
 {chr(10).join([f"{i + 1}. {comp['name']}: {comp['description']}" for i, comp in enumerate(companies_data)])}
 
-For each company in the list, provide the following analysis:
+For each company in the list, provide the following analysis. IMPORTANT: You MUST analyze ALL companies in the exact order they are listed above.
 
 1.  **Business Summary**: A concise 1-2 sentence summary of what the company does.
 2.  **Business Model**: How the company primarily generates revenue (e.g., B2B, B2C, SaaS, advertising).
@@ -136,11 +157,13 @@ For each company in the list, provide the following analysis:
 5.  **Relevance Reason**: A brief 1-2 sentence explanation for the given relevance score.
 
 **Required Response Format (Strict JSON):**
+Return a JSON object with exactly {len(companies_data)} companies in the EXACT same order as listed above.
+
 ```json
 {{
   "companies": [
     {{
-      "company_name": "Company Name",
+      "company_name": "Exact Company Name from List",
       "business_summary": "Clear summary of what they do.",
       "business_model": "How they make money.",
       "key_products_services": "Main products/services.",
@@ -151,8 +174,14 @@ For each company in the list, provide the following analysis:
 }}
 ```
 
-IMPORTANT: The relevance_score MUST be a numeric value (like 85.50). Ensure the JSON is perfectly formatted.
+CRITICAL: 
+- You MUST return exactly {len(companies_data)} companies
+- Use the EXACT company names as provided in the numbered list
+- Keep the same order as the input list
+- The relevance_score MUST be a numeric value (like 85.50)
+- Ensure the JSON is perfectly formatted
 """
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -166,39 +195,75 @@ IMPORTANT: The relevance_score MUST be a numeric value (like 85.50). Ensure the 
             else:
                 json_start = full_response.find('{')
                 json_end = full_response.rfind('}') + 1
-                if json_start == -1 or json_end == 0: raise ValueError("No JSON found in response")
+                if json_start == -1 or json_end == 0: 
+                    raise ValueError("No JSON found in response")
                 json_str = full_response[json_start:json_end]
 
             parsed_data = json.loads(json_str)
             companies_analysis = parsed_data.get('companies', [])
 
+            # Create results with proper matching
             batch_results = []
             for i, comp_data in enumerate(companies_data):
                 original_row = batch_df.iloc[i]
-                analysis = companies_analysis[i] if i < len(companies_analysis) else {}
-                result_entry = {
-                    "Company Name": comp_data["name"],
-                    "Industry": original_row["Industry"],
-                    "Original Business Description": comp_data["description"],
-                    "Business Summary": analysis.get("business_summary", "N/A"),
-                    "Business Model": analysis.get("business_model", "N/A"),
-                    "Key Products/Services": analysis.get("key_products_services", "N/A"),
-                    "Relevance Score": analysis.get("relevance_score", 0.00),
-                    "Relevance Reason": analysis.get("relevance_reason", "AI did not return data for this company.")
-                }
+                
+                # Try to find matching analysis result
+                matched_analysis = None
+                
+                # First try exact index matching
+                if i < len(companies_analysis):
+                    matched_analysis = companies_analysis[i]
+                
+                # If that fails, try fuzzy matching by name
+                if not matched_analysis or not matched_analysis.get('company_name'):
+                    matched_analysis = find_best_match(comp_data["name"], companies_analysis)
+                
+                # Create result entry
+                if matched_analysis:
+                    result_entry = {
+                        "Company Name": comp_data["name"],
+                        "Industry": original_row["Industry"],
+                        "Original Business Description": comp_data["description"],
+                        "Business Summary": matched_analysis.get("business_summary", "Analysis not available"),
+                        "Business Model": matched_analysis.get("business_model", "Not specified"),
+                        "Key Products/Services": matched_analysis.get("key_products_services", "Not specified"),
+                        "Relevance Score": matched_analysis.get("relevance_score", 0.00),
+                        "Relevance Reason": matched_analysis.get("relevance_reason", "Analysis not available")
+                    }
+                else:
+                    # Fallback for unmatched companies
+                    result_entry = {
+                        "Company Name": comp_data["name"],
+                        "Industry": original_row["Industry"],
+                        "Original Business Description": comp_data["description"],
+                        "Business Summary": "Analysis not available - matching failed",
+                        "Business Model": "Not analyzed",
+                        "Key Products/Services": "Not analyzed",
+                        "Relevance Score": 0.00,
+                        "Relevance Reason": "Company analysis could not be matched"
+                    }
+                
                 batch_results.append(result_entry)
+            
             return batch_results, None  # Success
+            
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)  # Exponential backoff for retries
                 continue
             else:  # Final attempt failed
-                error_results = [{
-                    "Company Name": comp["name"], "Industry": batch_df.iloc[i]["Industry"],
-                    "Original Business Description": comp["description"], "Business Summary": "Processing failed",
-                    "Business Model": "Error", "Key Products/Services": "Error", "Relevance Score": 0.00,
-                    "Relevance Reason": f"API/Parsing Error: {str(e)}"
-                } for i, comp in enumerate(companies_data)]
+                error_results = []
+                for i, comp in enumerate(companies_data):
+                    error_results.append({
+                        "Company Name": comp["name"], 
+                        "Industry": batch_df.iloc[i]["Industry"],
+                        "Original Business Description": comp["description"], 
+                        "Business Summary": "Processing failed",
+                        "Business Model": "Error", 
+                        "Key Products/Services": "Error", 
+                        "Relevance Score": 0.00,
+                        "Relevance Reason": f"API/Parsing Error: {str(e)}"
+                    })
                 return error_results, f"A batch failed after {max_retries} attempts. Error: {e}"
 
 
@@ -416,4 +481,4 @@ with tab3:
 
 # --- Footer ---
 st.markdown("---")
-st.markdown("Industry Peer Analysis Tool v2.1 | Built with Streamlit & Gemini")
+st.markdown("Industry Peer Analysis Tool v2.2 | Built with Streamlit & Gemini")
