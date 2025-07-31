@@ -20,6 +20,11 @@ st.set_page_config(
 # --- Custom CSS: To make the app look better ---
 st.markdown("""
 <style>
+    /* Hide GitHub button */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
     .main-header {
         background: linear-gradient(90deg, #0284c7 0%, #0369a1 100%);
         padding: 2rem;
