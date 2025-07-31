@@ -21,8 +21,7 @@ st.set_page_config(
 # --- Custom CSS: To make the app look better ---
 st.markdown("""
 <style>
-    /* Hide GitHub button */
-    #MainMenu {visibility: hidden;}
+    /* Hide GitHub button and footer */
     footer {visibility: hidden;}
     header {visibility: hidden;}
     
@@ -363,10 +362,12 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# --- Sidebar for Configuration ---
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    st.subheader("🔐 Gemini API Keys")
+# --- API Configuration Section ---
+st.markdown("---")
+api_config_expanded = st.button("⚙️ Show/Hide API Configuration", use_container_width=True)
+
+if api_config_expanded:
+    st.markdown("### 🔐 Gemini API Keys")
     new_api_key = st.text_input("Add API Key", type="password", placeholder="Enter your Gemini API key here")
 
     col1, col2 = st.columns(2)
@@ -389,9 +390,13 @@ with st.sidebar:
     else:
         st.warning("Please add at least one Gemini API key.")
 
-    st.subheader("⚙️ Processing Settings")
+    st.markdown("### ⚙️ Processing Settings")
     batch_size = st.slider("Batch Size", 1, 10, 5, help="Number of companies to process in each API call.")
     key_usage_limit = st.slider("Key Usage Limit", 5, 50, 20, help="API calls per key before rotating.")
+else:
+    # Default values when config is hidden
+    batch_size = 5
+    key_usage_limit = 20
 
 # --- Main Content Tabs ---
 tab1, tab2, tab3, tab4 = st.tabs(["▶️ Select & Analyze", "📊 Results", "📈 Analytics", "💰 Financial Data"])
@@ -429,7 +434,7 @@ with tab1:
                     if st.session_state.api_keys:
                         run_analysis(companies_to_analyze_df, target_bd, batch_size, key_usage_limit, selected_symbol)
                     else:
-                        st.warning("⚠️ Please add at least one API key in the sidebar to start.")
+                        st.warning("⚠️ Please add at least one API key in the configuration section above to start.")
             else:
                 st.warning(f"No companies found in the '{target_industry}' industry to compare against.")
     else:
