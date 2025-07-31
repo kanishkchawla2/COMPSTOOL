@@ -139,6 +139,11 @@ def fetch_yfinance_data(symbols):
             st.toast(f"❌ Failed for {symbol}: {str(e)}")
 
         progress_bar.progress((i + 1) / len(symbols), f"Processing {i + 1}/{len(symbols)} symbols...")
+        
+        # Add 5-second delay after every 5 stocks to prevent rate limiting
+        if (i + 1) % 5 == 0 and (i + 1) < len(symbols):
+            st.info(f"⏳ Taking a 5-second break after processing {i + 1} stocks to prevent rate limiting...")
+            time.sleep(5)
 
     progress_bar.empty()
 
