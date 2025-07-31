@@ -364,39 +364,32 @@ st.markdown("""
 
 # --- API Configuration Section ---
 st.markdown("---")
-api_config_expanded = st.button("⚙️ Show/Hide API Configuration", use_container_width=True)
+st.markdown("### 🔐 Gemini API Keys")
+new_api_key = st.text_input("Add API Key", type="password", placeholder="Enter your Gemini API key here")
 
-if api_config_expanded:
-    st.markdown("### 🔐 Gemini API Keys")
-    new_api_key = st.text_input("Add API Key", type="password", placeholder="Enter your Gemini API key here")
-
-    col1, col2 = st.columns(2)
-    if col1.button("➕ Add Key", use_container_width=True):
-        if new_api_key and new_api_key not in st.session_state.api_keys:
-            st.session_state.api_keys.append(new_api_key)
-            st.success("API key added!")
-            time.sleep(1);
-            st.rerun()
-    if col2.button("🗑️ Clear All", use_container_width=True):
-        st.session_state.api_keys = []
-        st.success("All keys cleared!")
+col1, col2 = st.columns(2)
+if col1.button("➕ Add Key", use_container_width=True):
+    if new_api_key and new_api_key not in st.session_state.api_keys:
+        st.session_state.api_keys.append(new_api_key)
+        st.success("API key added!")
         time.sleep(1);
         st.rerun()
+if col2.button("🗑️ Clear All", use_container_width=True):
+    st.session_state.api_keys = []
+    st.success("All keys cleared!")
+    time.sleep(1);
+    st.rerun()
 
-    if st.session_state.api_keys:
-        st.write(f"**Current Keys:** {len(st.session_state.api_keys)}")
-        for i, key in enumerate(st.session_state.api_keys):
-            st.code(f"Key {i + 1}: {key[:8]}...{key[-4:]}")
-    else:
-        st.warning("Please add at least one Gemini API key.")
-
-    st.markdown("### ⚙️ Processing Settings")
-    batch_size = st.slider("Batch Size", 1, 10, 5, help="Number of companies to process in each API call.")
-    key_usage_limit = st.slider("Key Usage Limit", 5, 50, 20, help="API calls per key before rotating.")
+if st.session_state.api_keys:
+    st.write(f"**Current Keys:** {len(st.session_state.api_keys)}")
+    for i, key in enumerate(st.session_state.api_keys):
+        st.code(f"Key {i + 1}: {key[:8]}...{key[-4:]}")
 else:
-    # Default values when config is hidden
-    batch_size = 5
-    key_usage_limit = 20
+    st.warning("Please add at least one Gemini API key.")
+
+st.markdown("### ⚙️ Processing Settings")
+batch_size = st.slider("Batch Size", 1, 10, 5, help="Number of companies to process in each API call.")
+key_usage_limit = st.slider("Key Usage Limit", 5, 50, 20, help="API calls per key before rotating.")
 
 # --- Main Content Tabs ---
 tab1, tab2, tab3, tab4 = st.tabs(["▶️ Select & Analyze", "📊 Results", "📈 Analytics", "💰 Financial Data"])
