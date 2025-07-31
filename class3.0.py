@@ -8,6 +8,7 @@ import json
 import io
 import yfinance as yf
 from datetime import datetime
+import random
 
 # --- Page Configuration: Basic setup for the app ---
 st.set_page_config(
@@ -118,6 +119,9 @@ def fetch_yfinance_data(symbols):
     successful_fetches = 0
     failed_fetches = 0
 
+    # Set up for random breaks
+    next_break = random.randint(3, 7)
+
     for i, symbol in enumerate(symbols):
         try:
             yf_symbol = add_ns_suffix(symbol)
@@ -140,10 +144,12 @@ def fetch_yfinance_data(symbols):
 
         progress_bar.progress((i + 1) / len(symbols), f"Processing {i + 1}/{len(symbols)} symbols...")
         
-        # Add 5-second delay after every 5 stocks to prevent rate limiting
-        if (i + 1) % 5 == 0 and (i + 1) < len(symbols):
-            st.info(f"⏳ Taking a 5-second break after processing {i + 1} stocks to prevent rate limiting...")
-            time.sleep(5)
+        # Take a random break after a random number of stocks
+        if (i + 1) == next_break and (i + 1) < len(symbols):
+            sleep_time = random.randint(2, 7)
+            st.info(f"⏳ Taking a {sleep_time}-second break after processing {i + 1} stocks to prevent rate limiting...")
+            time.sleep(sleep_time)
+            next_break += random.randint(3, 7)
 
     progress_bar.empty()
 
