@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import time
 import google.generativeai as genai
 import re
 import json
 import io
+import yfinance as yf
 from datetime import datetime
-from difflib import SequenceMatcher
 
 # --- Page Configuration: Basic setup for the app ---
 st.set_page_config(
@@ -46,6 +47,18 @@ st.markdown("""
         border-left: 4px solid #0ea5e9;
         margin: 1rem 0;
     }
+    .yfinance-section {
+        background: #f1f5f9;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 2px solid #e2e8f0;
+        margin: 1rem 0;
+    }
+    /* Style for summary rows */
+    .summary-row {
+        font-weight: bold;
+        background-color: #e2e8f0 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,8 +69,12 @@ if 'results_df' not in st.session_state:
     st.session_state.results_df = None
 if 'api_keys' not in st.session_state:
     st.session_state.api_keys = []
-if 'selected_company' not in st.session_state:
-    st.session_state.selected_company = ""
+if 'yfinance_data' not in st.session_state:
+    st.session_state.yfinance_data = None
+if 'available_yfinance_cols' not in st.session_state:
+    st.session_state.available_yfinance_cols = []
+if 'selected_yfinance_cols' not in st.session_state:
+    st.session_state.selected_yfinance_cols = []
 
 
 # --- Utility Functions: Helper functions for smaller tasks ---
@@ -79,6 +96,53 @@ def load_data(filepath="stock_info.xlsx"):
         return None
     except Exception as e:
         st.error(f"An error occurred while loading the data: {e}")
+        return None
+
+
+def add_ns_suffix(symbol):
+    """Add .NS suffix to symbol if it doesn't already have it for Indian stocks."""
+    if not (symbol.endswith('.NS') or symbol.endswith('.BO')):
+        return symbol + '.NS'
+    return symbol
+
+
+def fetch_yfinance_data(symbols):
+    """Fetch all available yfinance data for a list of company symbols."""
+    data = []
+    progress_bar = st.progress(0, "Fetching financial data...")
+    successful_fetches = 0
+    failed_fetches = 0
+
+    for i, symbol in enumerate(symbols):
+        try:
+            yf_symbol = add_ns_suffix(symbol)
+            ticker = yf.Ticker(yf_symbol)
+            info = ticker.info
+
+            if info and len(info) > 1:
+                info["Company Name"] = symbol  # Use original symbol as key
+                info["yf_symbol"] = yf_symbol  # Store the yfinance symbol
+                data.append(info)
+                successful_fetches += 1
+                st.toast(f"✅ Fetched data for {symbol}")
+            else:
+                failed_fetches += 1
+                st.toast(f"⚠️ No data for {symbol}")
+
+        except Exception as e:
+            failed_fetches += 1
+            st.toast(f"❌ Failed for {symbol}: {str(e)}")
+
+        progress_bar.progress((i + 1) / len(symbols), f"Processing {i + 1}/{len(symbols)} symbols...")
+
+    progress_bar.empty()
+
+    if data:
+        df = pd.DataFrame(data)
+        st.success(f"✅ Successfully fetched data for {successful_fetches} companies. {failed_fetches} failed.")
+        return df
+    else:
+        st.error("❌ No financial data was successfully fetched")
         return None
 
 
@@ -108,27 +172,7 @@ def load_gemini_model(api_key):
         raise Exception(f"Failed to initialize Gemini model. Check your API Key. Error: {e}")
 
 
-def find_best_match(company_name, analysis_results):
-    """Find the best matching analysis result for a company name using fuzzy matching."""
-    if not analysis_results:
-        return None
-    
-    best_match = None
-    best_similarity = 0
-    
-    for analysis in analysis_results:
-        analysis_name = analysis.get('company_name', '').strip()
-        similarity = SequenceMatcher(None, company_name.lower(), analysis_name.lower()).ratio()
-        
-        if similarity > best_similarity:
-            best_similarity = similarity
-            best_match = analysis
-    
-    # Only return match if similarity is above threshold
-    return best_match if best_similarity > 0.6 else None
-
-
-def process_batch(batch_df, target_bd, model):
+def process_batch(batch_df, target_bd, model, target_company_name):
     """Processes a single batch of companies by sending them to the AI."""
     companies_data = []
     for _, row in batch_df.iterrows():
@@ -138,32 +182,32 @@ def process_batch(batch_df, target_bd, model):
             comp_bd = "No business description available"
         companies_data.append({"name": str(comp_name), "description": str(comp_bd)})
 
-    # This detailed prompt guides the AI to produce a structured JSON output
+    # --- MODIFIED PROMPT ---
+    # Added a more forceful instruction to ensure all companies are returned.
     prompt = f"""
 You are a financial analyst specializing in competitive intelligence. Your task is to analyze a list of companies and compare them to a primary target company based on their business descriptions.
 
+**TARGET COMPANY'S NAME:** {target_company_name}
 **TARGET COMPANY'S BUSINESS DESCRIPTION:**
 {target_bd}
 
 **COMPANIES TO ANALYZE (PEERS IN THE SAME INDUSTRY):**
 {chr(10).join([f"{i + 1}. {comp['name']}: {comp['description']}" for i, comp in enumerate(companies_data)])}
 
-For each company in the list, provide the following analysis. IMPORTANT: You MUST analyze ALL companies in the exact order they are listed above.
+For each company in the list, provide the following analysis:
 
 1.  **Business Summary**: A concise 1-2 sentence summary of what the company does.
 2.  **Business Model**: How the company primarily generates revenue (e.g., B2B, B2C, SaaS, advertising).
 3.  **Key Products/Services**: The main products or services offered.
-4.  **Relevance Score**: A numerical score from 1.00 to 100.00 indicating how similar the company's business is to the target company. A higher score means a more direct competitor. For the target company itself, this score should be 100.00.
+4.  **Relevance Score**: A numerical score from 1.00 to 100.00 indicating how similar the company's business is to the target company. A higher score means a more direct competitor. If the company being analyzed is the target company itself ({target_company_name}), its score MUST be 100.00.
 5.  **Relevance Reason**: A brief 1-2 sentence explanation for the given relevance score.
 
 **Required Response Format (Strict JSON):**
-Return a JSON object with exactly {len(companies_data)} companies in the EXACT same order as listed above.
-
 ```json
 {{
   "companies": [
     {{
-      "company_name": "Exact Company Name from List",
+      "company_name": "Company Name",
       "business_summary": "Clear summary of what they do.",
       "business_model": "How they make money.",
       "key_products_services": "Main products/services.",
@@ -174,100 +218,63 @@ Return a JSON object with exactly {len(companies_data)} companies in the EXACT s
 }}
 ```
 
-CRITICAL: 
-- You MUST return exactly {len(companies_data)} companies
-- Use the EXACT company names as provided in the numbered list
-- Keep the same order as the input list
-- The relevance_score MUST be a numeric value (like 85.50)
-- Ensure the JSON is perfectly formatted
+IMPORTANT:
+- The `relevance_score` MUST be a numeric value (like 85.50).
+- The JSON response MUST be perfectly formatted.
+- It is MANDATORY to return a JSON object for every single company provided in the input list. Do not omit any company. If you lack specific information for a company, fill the fields with your best estimate or state "Information not available".
 """
-    
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = model.generate_content(prompt)
             full_response = response.text.strip()
 
-            # Robustly extract the JSON block from the AI's response
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', full_response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(1)
             else:
                 json_start = full_response.find('{')
                 json_end = full_response.rfind('}') + 1
-                if json_start == -1 or json_end == 0: 
-                    raise ValueError("No JSON found in response")
+                if json_start == -1 or json_end == 0: raise ValueError("No JSON found in response")
                 json_str = full_response[json_start:json_end]
 
             parsed_data = json.loads(json_str)
             companies_analysis = parsed_data.get('companies', [])
 
-            # Create results with proper matching
             batch_results = []
             for i, comp_data in enumerate(companies_data):
                 original_row = batch_df.iloc[i]
-                
-                # Try to find matching analysis result
-                matched_analysis = None
-                
-                # First try exact index matching
-                if i < len(companies_analysis):
-                    matched_analysis = companies_analysis[i]
-                
-                # If that fails, try fuzzy matching by name
-                if not matched_analysis or not matched_analysis.get('company_name'):
-                    matched_analysis = find_best_match(comp_data["name"], companies_analysis)
-                
-                # Create result entry
-                if matched_analysis:
-                    result_entry = {
-                        "Company Name": comp_data["name"],
-                        "Industry": original_row["Industry"],
-                        "Original Business Description": comp_data["description"],
-                        "Business Summary": matched_analysis.get("business_summary", "Analysis not available"),
-                        "Business Model": matched_analysis.get("business_model", "Not specified"),
-                        "Key Products/Services": matched_analysis.get("key_products_services", "Not specified"),
-                        "Relevance Score": matched_analysis.get("relevance_score", 0.00),
-                        "Relevance Reason": matched_analysis.get("relevance_reason", "Analysis not available")
-                    }
-                else:
-                    # Fallback for unmatched companies
-                    result_entry = {
-                        "Company Name": comp_data["name"],
-                        "Industry": original_row["Industry"],
-                        "Original Business Description": comp_data["description"],
-                        "Business Summary": "Analysis not available - matching failed",
-                        "Business Model": "Not analyzed",
-                        "Key Products/Services": "Not analyzed",
-                        "Relevance Score": 0.00,
-                        "Relevance Reason": "Company analysis could not be matched"
-                    }
-                
+                # Find the matching analysis by name, case-insensitively
+                analysis = next((item for item in companies_analysis if
+                                 item.get("company_name", "").lower() == comp_data["name"].lower()), {})
+
+                result_entry = {
+                    "Company Name": comp_data["name"],
+                    "Industry": original_row["Industry"],
+                    "Original Business Description": comp_data["description"],
+                    "Business Summary": analysis.get("business_summary", "N/A"),
+                    "Business Model": analysis.get("business_model", "N/A"),
+                    "Key Products/Services": analysis.get("key_products_services", "N/A"),
+                    "Relevance Score": analysis.get("relevance_score", 0.00),
+                    "Relevance Reason": analysis.get("relevance_reason", "AI did not return data for this company.")
+                }
                 batch_results.append(result_entry)
-            
-            return batch_results, None  # Success
-            
+            return batch_results, None
         except Exception as e:
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # Exponential backoff for retries
+                time.sleep(2 ** attempt)
                 continue
-            else:  # Final attempt failed
-                error_results = []
-                for i, comp in enumerate(companies_data):
-                    error_results.append({
-                        "Company Name": comp["name"], 
-                        "Industry": batch_df.iloc[i]["Industry"],
-                        "Original Business Description": comp["description"], 
-                        "Business Summary": "Processing failed",
-                        "Business Model": "Error", 
-                        "Key Products/Services": "Error", 
-                        "Relevance Score": 0.00,
-                        "Relevance Reason": f"API/Parsing Error: {str(e)}"
-                    })
+            else:
+                error_results = [{
+                    "Company Name": comp["name"], "Industry": batch_df.iloc[i]["Industry"],
+                    "Original Business Description": comp["description"], "Business Summary": "Processing failed",
+                    "Business Model": "Error", "Key Products/Services": "Error", "Relevance Score": 0.00,
+                    "Relevance Reason": f"API/Parsing Error: {str(e)}"
+                } for i, comp in enumerate(companies_data)]
                 return error_results, f"A batch failed after {max_retries} attempts. Error: {e}"
 
 
-def run_analysis(df_to_process, target_bd, batch_size, key_usage_limit):
+def run_analysis(df_to_process, target_bd, batch_size, key_usage_limit, target_company_name):
     """Manages the analysis process, including progress bars and key rotation."""
     api_keys = st.session_state.api_keys
     if not api_keys:
@@ -285,12 +292,11 @@ def run_analysis(df_to_process, target_bd, batch_size, key_usage_limit):
         all_results = []
 
         for i in range(total_batches):
-            # Rotate API key if usage limit is reached
             if calls_with_current_key >= key_usage_limit:
                 current_key_index = (current_key_index + 1) % len(api_keys)
                 st.toast(f"Switching to API Key #{current_key_index + 1}")
                 model = load_gemini_model(api_keys[current_key_index])
-                calls_with_current_key = 0  # Reset counter
+                calls_with_current_key = 0
             calls_with_current_key += 1
 
             start_idx = i * batch_size
@@ -298,12 +304,12 @@ def run_analysis(df_to_process, target_bd, batch_size, key_usage_limit):
             batch_df = df_to_process.iloc[start_idx:end_idx]
 
             progress_bar.progress((i + 1) / total_batches, f"Processing Batch {i + 1}/{total_batches}...")
-            batch_results, error = process_batch(batch_df, target_bd, model)
+            batch_results, error = process_batch(batch_df, target_bd, model, target_company_name)
 
-            if error: st.warning(error)  # Show non-fatal error to user
+            if error: st.warning(error)
 
             all_results.extend(batch_results)
-            if i < total_batches - 1: time.sleep(1)  # Brief pause between batches
+            if i < total_batches - 1: time.sleep(1)
 
         final_df = pd.DataFrame(all_results)
         final_df['Relevance Score'] = final_df['Relevance Score'].apply(clean_relevance_score).clip(0, 100)
@@ -320,14 +326,24 @@ def run_analysis(df_to_process, target_bd, batch_size, key_usage_limit):
         progress_bar.empty()
 
 
+def merge_yfinance_data(results_df, yfinance_df, selected_cols):
+    """Merge the analysis results with selected yfinance data."""
+    if yfinance_df is None or results_df is None or not selected_cols:
+        return results_df
+
+    yf_subset = yfinance_df[['Company Name'] + selected_cols].copy()
+    merged_df = pd.merge(results_df, yf_subset, on='Company Name', how='left')
+    return merged_df
+
+
 # --- Main Application UI ---
 
-master_df = load_data()  # Load data at the start
+master_df = load_data()
 
 st.markdown("""
 <div class="main-header">
     <h1>🔎 Industry Peer Analysis Tool</h1>
-    <p>Select a company to analyze its direct competitors within the same industry using AI.</p>
+    <p>Select a company to analyze its direct competitors within the same industry using AI and financial data.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -362,78 +378,181 @@ with st.sidebar:
     key_usage_limit = st.slider("Key Usage Limit", 5, 50, 20, help="API calls per key before rotating.")
 
 # --- Main Content Tabs ---
-tab1, tab2, tab3 = st.tabs(["▶️ Select & Analyze", "📊 Results", "📈 Analytics"])
+tab1, tab2, tab3, tab4 = st.tabs(["▶️ Select & Analyze", "📊 Results", "📈 Analytics", "💰 Financial Data"])
 
 with tab1:
     st.header("1. Select a Company for Analysis")
     if master_df is not None:
-        company_list = master_df['Company Name'].unique().tolist()
-        selected_company = st.selectbox(
-            "Search for a company:",
-            options=[""] + sorted(company_list),
-            format_func=lambda x: "Select a company..." if x == "" else x,
+        symbols_list = master_df['Company Name'].unique().tolist()
+        selected_symbol = st.selectbox(
+            "Search for a company by its symbol:",
+            options=[""] + sorted(symbols_list),
+            format_func=lambda x: "Select a symbol..." if x == "" else x,
             help="Choose the company you want to analyze."
         )
 
-        # Store selected company in session state
-        if selected_company:
-            st.session_state.selected_company = selected_company
-
-        if selected_company:
-            target_company_data = master_df[master_df['Company Name'] == selected_company].iloc[0]
+        if selected_symbol:
+            target_company_data = master_df[master_df['Company Name'] == selected_symbol].iloc[0]
             target_bd = target_company_data['Business Description']
             target_industry = target_company_data['Industry']
 
-            st.subheader(f"Target: {selected_company} ({target_industry})")
+            st.subheader(f"Target: {selected_symbol} ({target_industry})")
             with st.expander("Show Business Description"):
                 st.write(target_bd)
 
             # This dataframe now includes the target company for analysis.
             companies_to_analyze_df = master_df[
-                (master_df['Industry'] == target_industry)
-            ].copy()
+                master_df['Industry'] == target_industry
+                ].copy()
 
             st.header("2. Start Analysis")
             if not companies_to_analyze_df.empty:
                 st.write(
-                    f"Found **{len(companies_to_analyze_df)}** companies in the **'{target_industry}'** industry to analyze (including the target company).")
-                if st.button(f"🚀 Analyze Industry for {selected_company}", type="primary"):
+                    f"Found **{len(companies_to_analyze_df)}** companies in the **'{target_industry}'** industry to analyze (including the target).")
+                if st.button(f"🚀 Analyze Peers of {selected_symbol}", type="primary"):
                     if st.session_state.api_keys:
-                        run_analysis(companies_to_analyze_df, target_bd, batch_size, key_usage_limit)
+                        run_analysis(companies_to_analyze_df, target_bd, batch_size, key_usage_limit, selected_symbol)
                     else:
                         st.warning("⚠️ Please add at least one API key in the sidebar to start.")
             else:
                 st.warning(f"No companies found in the '{target_industry}' industry to compare against.")
     else:
-        st.error("Data could not be loaded. Please check the `stock_info.xlsx` file.")
+        st.error("Data could not be loaded. Please check the `stock_data.xlsx` file.")
 
 with tab2:
     st.header("📊 Processing Results")
     if st.session_state.processing_complete and st.session_state.results_df is not None:
-        df_results = st.session_state.results_df
+        # Make a copy to work with, preserving the original state
+        df_results = st.session_state.results_df.copy()
 
-        st.subheader("Key Metrics")
+        st.markdown('<div class="yfinance-section">', unsafe_allow_html=True)
+        st.subheader("💰 Enhance with Financial Data")
+
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            if st.button("🔄 Fetch Financial Data", help="Fetch yfinance data for all companies in results"):
+                with st.spinner("Fetching data... this may take a moment."):
+                    company_symbols = df_results['Company Name'].unique().tolist()
+                    yf_data = fetch_yfinance_data(company_symbols)
+                    if yf_data is not None:
+                        st.session_state.yfinance_data = yf_data
+                        available_cols = sorted(
+                            [col for col in yf_data.columns if col not in ['Company Name', 'yf_symbol']])
+                        st.session_state.available_yfinance_cols = available_cols
+                        st.rerun()
+
+        with col2:
+            if st.session_state.yfinance_data is not None:
+                st.metric("Financial Data Points", f"{len(st.session_state.yfinance_data)} companies")
+
+        if st.session_state.available_yfinance_cols:
+            st.subheader("📋 Select Financial Metrics to Include")
+
+            b_col1, b_col2, b_col3 = st.columns(3)
+            if b_col1.button("✅ Select All Metrics", use_container_width=True):
+                st.session_state.selected_yfinance_cols = st.session_state.available_yfinance_cols
+                st.rerun()
+            if b_col2.button("📈 Select Key Valuation Metrics", use_container_width=True):
+                st.session_state.selected_yfinance_cols = [
+                    c for c in
+                    ['currentPrice', 'marketCap', 'enterpriseValue', 'forwardPE', 'trailingPE', 'priceToBook',
+                     'priceToSalesTrailing12Months']
+                    if c in st.session_state.available_yfinance_cols
+                ]
+                st.rerun()
+            if b_col3.button("🗑️ Clear Selection", use_container_width=True):
+                st.session_state.selected_yfinance_cols = []
+                st.rerun()
+
+            selected_cols = st.multiselect(
+                "Choose financial metrics:",
+                options=st.session_state.available_yfinance_cols,
+                default=st.session_state.selected_yfinance_cols,
+                help="Select the financial metrics you want to include in your analysis"
+            )
+            if selected_cols != st.session_state.selected_yfinance_cols:
+                st.session_state.selected_yfinance_cols = selected_cols
+                st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Merge data if selections are made
+        if st.session_state.selected_yfinance_cols and st.session_state.yfinance_data is not None:
+            df_results = merge_yfinance_data(
+                df_results,
+                st.session_state.yfinance_data,
+                st.session_state.selected_yfinance_cols
+            )
+
+        # --- NEW: Add the relevance score slider ---
+        relevance_threshold = st.slider(
+            "Filter by Minimum Relevance Score",
+            min_value=0,
+            max_value=100,
+            value=0,  # Default to show all
+            help="Show companies with a relevance score greater than or equal to the selected value."
+        )
+
+        # --- Apply the filter for display ---
+        df_for_display = df_results[df_results['Relevance Score'] >= relevance_threshold]
+
+        # --- Update metrics based on the filtered view ---
+        st.subheader("📊 Filtered Summary")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Companies Analyzed", len(df_results))
-        col2.metric("High Relevance (>70)", len(df_results[df_results['Relevance Score'] >= 70]))
+        col1.metric("Companies Displayed", len(df_for_display))
+        col2.metric("High Relevance (>70)", len(df_for_display[df_for_display['Relevance Score'] >= 70]))
         col3.metric("Medium Relevance (50-69)",
-                    len(df_results[(df_results['Relevance Score'] >= 50) & (df_results['Relevance Score'] < 70)]))
-        col4.metric("Average Relevance Score", f"{df_results['Relevance Score'].mean():.2f}")
+                    len(df_for_display[
+                            (df_for_display['Relevance Score'] >= 50) & (df_for_display['Relevance Score'] < 70)]))
+        avg_score = df_for_display['Relevance Score'].mean() if not df_for_display.empty else 0
+        col4.metric("Average Relevance Score", f"{avg_score:.2f}")
 
-        st.subheader("📋 Detailed Results")
-        st.dataframe(df_results, use_container_width=True, height=500)
+        st.subheader("📋 Detailed Results Editor")
+        st.info("ℹ️ You can delete rows from the table. Double-click any cell to see its full content.")
 
-        # Create an in-memory Excel file for download
+        # --- Give the filtered data to the editor ---
+        edited_df = st.data_editor(
+            df_for_display,
+            key="results_editor",
+            use_container_width=True,
+            height=500,
+            num_rows="dynamic"  # Allows row deletion
+        )
+
+        # --- Check if the edited view is different from the displayed view ---
+        if not edited_df.equals(df_for_display):
+            # If the user deletes a row, update the main session state dataframe
+            # by keeping only the rows that are still present in the edited_df.
+            # This works because edited_df preserves the original index.
+            st.session_state.results_df = st.session_state.results_df.loc[edited_df.index]
+            st.rerun()
+
+        # --- Calculate and display summary rows based on the final displayed data ---
+        if not edited_df.empty:
+            st.subheader("📊 Summary Statistics for Displayed Data")
+            numeric_cols = edited_df.select_dtypes(include=np.number).columns.tolist()
+
+            if numeric_cols:
+                avg_series = edited_df[numeric_cols].mean()
+                median_series = edited_df[numeric_cols].median()
+                summary_df = pd.DataFrame([avg_series, median_series], index=['Average', 'Median']).round(2)
+                st.dataframe(summary_df, use_container_width=True)
+            else:
+                st.warning("No numeric columns available to calculate summary statistics for the current view.")
+
+        # --- Download button uses the final displayed (and potentially edited) data ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_results.to_excel(writer, sheet_name='Analysis_Results', index=False)
+            edited_df.to_excel(writer, sheet_name='Filtered_Analysis_Results', index=False)
+            if st.session_state.yfinance_data is not None:
+                st.session_state.yfinance_data.to_excel(writer, sheet_name='Raw_Financial_Data', index=False)
         output.seek(0)
 
-        current_date = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename_suffix = "enhanced_filtered" if st.session_state.selected_yfinance_cols else "basic_filtered"
         st.download_button(
-            label="📥 Download Results (Excel)",
+            label="📥 Download Displayed Results (Excel)",
             data=output,
-            file_name=f"peer_analysis_{st.session_state.selected_company}_{current_date}.xlsx",
+            file_name=f"peer_analysis_{filename_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
@@ -441,44 +560,55 @@ with tab2:
 
 with tab3:
     st.header("📈 Analytics Dashboard")
+    # --- MODIFIED: Use the potentially edited dataframe from session state ---
     if st.session_state.processing_complete and st.session_state.results_df is not None:
         df_results = st.session_state.results_df
 
-        st.subheader("📊 Relevance Score Distribution")
-        st.bar_chart(df_results['Relevance Score'].value_counts().sort_index())
+        st.subheader("📊 Relevance Score Distribution (All Results)")
+        st.bar_chart(df_results.set_index('Company Name')['Relevance Score'])
 
-        st.subheader("🏆 Top 10 Companies by Relevance (Including Target)")
-        # Show all companies including the target company (which should have score 100)
-        top_companies = df_results.head(10)
+        st.subheader("🏆 Top 10 Most Relevant Peers (All Results)")
+        top_peers = df_results.head(11)[['Company Name', 'Relevance Score', 'Business Model', 'Business Summary']]
+        st.dataframe(top_peers, use_container_width=True)
 
-        # Highlight the target company in the display
-        display_df = top_companies[['Company Name', 'Relevance Score', 'Business Model', 'Business Summary']].copy()
-
-        # Add a column to indicate which is the target company
-        if st.session_state.selected_company:
-            display_df['Is Target'] = display_df['Company Name'] == st.session_state.selected_company
-            display_df['Company Type'] = display_df['Is Target'].apply(lambda x: '🎯 TARGET' if x else '🏢 Peer')
-            display_df = display_df[
-                ['Company Name', 'Company Type', 'Relevance Score', 'Business Model', 'Business Summary']]
-
-        st.dataframe(display_df, use_container_width=True)
-
-        st.subheader("💼 Business Model Distribution")
+        st.subheader("💼 Business Model Distribution (All Results)")
         model_counts = df_results['Business Model'].value_counts().head(10)
         st.bar_chart(model_counts)
-
-        # Additional section showing only peer companies (excluding target)
-        if st.session_state.selected_company:
-            st.subheader("🔍 Top Peer Companies (Excluding Target)")
-            peer_companies = df_results[df_results['Company Name'] != st.session_state.selected_company].head(10)
-            if not peer_companies.empty:
-                st.dataframe(peer_companies[['Company Name', 'Relevance Score', 'Business Model', 'Business Summary']],
-                             use_container_width=True)
-            else:
-                st.info("No peer companies found (only target company was analyzed).")
     else:
         st.info("📈 Analytics will be available after you run an analysis.")
 
+with tab4:
+    st.header("💰 Financial Data Management")
+    if st.session_state.yfinance_data is not None:
+        st.subheader("📊 Available Financial Data")
+        st.write(f"Financial data available for {len(st.session_state.yfinance_data)} companies.")
+
+        st.subheader("🔍 Preview of Financial Data")
+        st.dataframe(st.session_state.yfinance_data.head(10), use_container_width=True)
+
+        st.subheader("📋 All Available Financial Metrics")
+        st.info(f"A total of {len(st.session_state.available_yfinance_cols)} metrics were fetched from yfinance.")
+
+        num_cols = 4
+        cols = st.columns(num_cols)
+        for i, col_name in enumerate(st.session_state.available_yfinance_cols):
+            with cols[i % num_cols]:
+                st.write(f"• `{col_name}`")
+
+        st.subheader("📥 Download Raw Financial Data")
+        financial_output = io.BytesIO()
+        st.session_state.yfinance_data.to_excel(financial_output, index=False, engine='openpyxl')
+        financial_output.seek(0)
+
+        st.download_button(
+            label="📥 Download All Financial Data (Excel)",
+            data=financial_output,
+            file_name=f"raw_financial_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("💡 Financial data will appear here after you fetch it from the Results tab.")
+
 # --- Footer ---
 st.markdown("---")
-st.markdown("Industry Peer Analysis Tool v2.2 | Built with Streamlit & Gemini")
+st.markdown("Industry Peer Analysis Tool v5.0 | Built with Streamlit, Gemini & yfinance")
